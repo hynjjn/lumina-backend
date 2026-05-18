@@ -2,12 +2,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 import jwt
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import current_user
+from app.deps import OptionalBearer, current_user
 from app.google_oauth import authorize_url, exchange_code
 from app.jwt_utils import decode_token, issue_token, make_oauth_state, parse_oauth_state
 from app.models import Article, User, WordbookEntry
@@ -24,14 +25,15 @@ def _auth_out(user: User, token: str, expires_at: datetime) -> AuthOut:
 
 
 async def _resolve_guest_id(
-    authorization: str | None, session: AsyncSession
+    creds: HTTPAuthorizationCredentials | None, session: AsyncSession
 ) -> str | None:
-    """Decode an optional bearer header; return its user_id only if it points
-    to a current guest user. Invalid/expired/non-guest tokens are silently ignored."""
-    if not authorization or not authorization.lower().startswith("bearer "):
+    """Return the bearer's user_id only if it points to a current guest. Invalid /
+    expired / non-guest tokens are silently ignored — the caller is treating the
+    bearer as optional context for the guest-upgrade flow."""
+    if creds is None:
         return None
     try:
-        uid = decode_token(authorization.split(" ", 1)[1])
+        uid = decode_token(creds.credentials)
     except jwt.PyJWTError:
         return None
     user = await session.get(User, uid)
@@ -78,7 +80,7 @@ async def create_guest(session: Annotated[AsyncSession, Depends(get_session)]) -
 async def signup(
     body: SignupIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    authorization: Annotated[str | None, Header()] = None,
+    creds: OptionalBearer = None,
 ) -> AuthOut:
     """Create an email/password account. If a guest bearer is present, upgrade
     that guest row in place so their wordbook/reading list survives."""
@@ -87,11 +89,10 @@ async def signup(
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already in use")
 
     pw_hash = hash_password(body.password)
-    guest_id = await _resolve_guest_id(authorization, session)
+    guest_id = await _resolve_guest_id(creds, session)
 
     if guest_id:
         user = await session.get(User, guest_id)
-        # _resolve_guest_id already verified is_guest, but recheck for safety
         if user is None or not user.is_guest:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Guest not found")
         user.is_guest = False
@@ -114,7 +115,7 @@ async def signup(
 async def login(
     body: LoginIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    authorization: Annotated[str | None, Header()] = None,
+    creds: OptionalBearer = None,
 ) -> AuthOut:
     """Authenticate by email + password. If a guest bearer is present and the
     logged-in user is different, the guest's data is merged into the real user."""
@@ -126,7 +127,7 @@ async def login(
         # (bcrypt verify dominates); harden later with a dummy-hash compare.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
 
-    guest_id = await _resolve_guest_id(authorization, session)
+    guest_id = await _resolve_guest_id(creds, session)
     await _merge_guest_into(guest_id, user, session)
 
     return await _finalize(user, session)
@@ -135,14 +136,14 @@ async def login(
 @router.get("/google/login", response_model=GoogleLoginOut)
 async def google_login(
     session: Annotated[AsyncSession, Depends(get_session)],
-    authorization: Annotated[str | None, Header()] = None,
+    creds: OptionalBearer = None,
 ) -> GoogleLoginOut:
     """Returns the Google authorize URL. Frontend redirects the browser there.
 
     If a guest bearer is included, the guest's id is embedded in `state` so the
     callback can upgrade the same row instead of creating a new user.
     """
-    guest_id = await _resolve_guest_id(authorization, session)
+    guest_id = await _resolve_guest_id(creds, session)
     return GoogleLoginOut(url=authorize_url(make_oauth_state(guest_id)))
 
 
