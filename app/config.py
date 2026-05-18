@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
 
     gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
 
     database_url: str = "sqlite+aiosqlite:///./lumina.db"
     frontend_url: str = "http://localhost:3000"

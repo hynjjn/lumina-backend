@@ -74,6 +74,19 @@ class WordbookEntryIn(BaseModel):
     definition_ko: str | None = None
 
 
+class GlossIn(BaseModel):
+    word: str = Field(min_length=1, max_length=128)
+    context: str | None = Field(default=None, max_length=2000)
+
+
+class GlossOut(BaseModel):
+    word: str
+    part_of_speech: str
+    definitions_en: list[str]
+    definition_ko: str
+    examples: list[str]
+
+
 class WordbookEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
