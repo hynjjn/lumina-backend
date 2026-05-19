@@ -10,7 +10,7 @@ and re-validating each hop, or by using a proxy.
 
 import asyncio
 import ipaddress
-import json
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -19,6 +19,8 @@ import trafilatura
 from fastapi import HTTPException, status
 
 UA = "Mozilla/5.0 (compatible; LuminaBot/0.1)"
+
+_IMG_RE = re.compile(r"!\[([^\]]*)\]\(\s*([^)]*?)\s*\)")
 
 
 async def _ensure_safe_url(url: str) -> None:
@@ -70,23 +72,47 @@ async def fetch_and_extract(url: str) -> tuple[str, str]:
             status.HTTP_502_BAD_GATEWAY, f"Source returned {resp.status_code}"
         )
 
-    # trafilatura.extract is CPU-bound (lxml parsing) — run off the event loop.
-    extracted = await asyncio.to_thread(
-        trafilatura.extract,
-        resp.text,
-        output_format="json",
-        with_metadata=True,
-    )
-    if not extracted:
+    # trafilatura is CPU-bound (lxml parsing) — run off the event loop.
+    title, content = await asyncio.to_thread(_extract_markdown, resp.text, url)
+    if not content:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Could not extract main content"
         )
+    return title, content
 
-    data = json.loads(extracted)
-    title = data.get("title") or "Untitled"
-    text = (data.get("text") or "").strip()
-    if not text:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, "Extracted content was empty"
-        )
-    return title, text
+
+def _extract_markdown(html: str, url: str) -> tuple[str, str]:
+    # Pull title from metadata; output_format="markdown" returns a bare string,
+    # so we fetch the title in a separate call.
+    meta = trafilatura.extract_metadata(html)
+    title = (getattr(meta, "title", None) or "Untitled").strip()
+
+    content = trafilatura.extract(
+        html,
+        url=url,
+        output_format="markdown",
+        include_links=True,
+        include_images=True,
+        include_formatting=True,
+    )
+    return title, _clean_markdown(content or "")
+
+
+def _clean_markdown(md: str) -> str:
+    """Normalize image markers so they render in a browser."""
+
+    def _fix(m: re.Match[str]) -> str:
+        alt, src = m.group(1), m.group(2).strip()
+        if not src:
+            return ""  # drop empty ![]() — would render as a broken image
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("http://"):
+            # Avoid mixed-content blocking when the frontend is on HTTPS.
+            src = "https://" + src[len("http://") :]
+        return f"![{alt}]({src})"
+
+    md = _IMG_RE.sub(_fix, md)
+    # Collapse consecutive duplicate image markers (common on Wikipedia).
+    md = re.sub(r"(!\[[^\]]*\]\([^)]+\))(?:\s*\1)+", r"\1", md)
+    return md.strip()
