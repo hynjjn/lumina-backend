@@ -4,6 +4,7 @@ __pycache__/
 *.db
 *.db-journal
 .env
+env.yaml
 .ruff_cache/
 .pytest_cache/
 .DS_Store
